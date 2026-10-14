@@ -461,6 +461,14 @@ if __name__ == "__main__":
         help="device to train on (default: auto = cuda if available, "
         "else xpu, else cpu)",
     )
+    parser.add_argument(
+        "--ezpz",
+        action="store_true",
+        help="use ezpz (https://github.com/saforem2/ezpz) for distributed "
+        "setup and device selection instead of the built-in env-based "
+        "setup; launch via `ezpz launch`. The DTensor/FSDP2 parallelism "
+        "in this file is unchanged either way.",
+    )
     args = parser.parse_args()
     args.device_type = detect_device_type(args.device)
 
@@ -499,25 +507,45 @@ if __name__ == "__main__":
         params.update({"num_data_workers": args.num_data_workers})
 
     params.distributed = False
-    if "WORLD_SIZE" in os.environ:
-        params.distributed = int(os.environ["WORLD_SIZE"]) > 1
-        world_size = int(os.environ["WORLD_SIZE"])
-    else:
-        world_size = 1
-
     world_rank = 0
     local_rank = 0
-    if params.distributed:
-        torch.distributed.init_process_group(
-            backend=default_backend(args.device_type), init_method="env://"
+    if args.ezpz:
+        # ezpz variant: ezpz discovers rank/world (MPI or env), picks and
+        # sets the device (cuda/xpu/cpu), and calls init_process_group --
+        # replacing the WORLD_SIZE/backend/device plumbing below. Launch
+        # with `ezpz launch ... train.py ... --ezpz`.
+        # NOTE: seed=None on purpose: train.py seeds *identically* on all
+        # ranks further down (tp ranks must build identical weights before
+        # sharding); ezpz's optional seeding is rank-aware, which would
+        # desynchronize that.
+        import ezpz
+
+        world_rank = ezpz.distributed.setup_torch(
+            tensor_parallel_size=args.tensor_parallel, seed=None
         )
-        world_rank = torch.distributed.get_rank()
-        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = ezpz.get_world_size()
+        local_rank = ezpz.get_local_rank()
+        args.device_type = ezpz.distributed.get_torch_device_type()
+        params.distributed = world_size > 1
+    else:
+        if "WORLD_SIZE" in os.environ:
+            params.distributed = int(os.environ["WORLD_SIZE"]) > 1
+            world_size = int(os.environ["WORLD_SIZE"])
+        else:
+            world_size = 1
+        if params.distributed:
+            torch.distributed.init_process_group(
+                backend=default_backend(args.device_type), init_method="env://"
+            )
+            world_rank = torch.distributed.get_rank()
+            local_rank = int(os.environ["LOCAL_RANK"])
     if world_rank == 0:
         logging.info(
             "Device: %s (process-group backend: %s)",
             args.device_type,
-            default_backend(args.device_type),
+            torch.distributed.get_backend()
+            if params.distributed
+            else default_backend(args.device_type),
         )
 
     # Work out the parallel layout. Ranks are arranged as dp x tp, with tp
