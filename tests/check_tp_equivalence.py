@@ -159,11 +159,17 @@ def worker(rank, world_size, tp, init_method):
                     f"{(full(p.grad) - ref_grads[name]).abs().max().item():.3e}"
                 )
 
-        # local shard of a block weight really is 1/tp the full size
+        # local shard of a block weight: TP colwise-shards dim 0 by tp and
+        # FSDP2 shards dim 0 over the dp mesh as well, so the local piece is
+        # 1/(tp * dp) of the full rows (dp counts only the sharding degree
+        # here because dp_replicate=1 in this test)
         if tp > 1:
             q = model.blocks[0].attn.q.weight
             local = q.to_local() if hasattr(q, "to_local") else q
-            assert local.shape[0] == ref_params["blocks.0.attn.q.weight"].shape[0] // tp
+            expect = ref_params["blocks.0.attn.q.weight"].shape[0] // (tp * dims.dp)
+            assert local.shape[0] == expect, (
+                f"[rank {rank}] q.weight local rows {local.shape[0]} != {expect}"
+            )
 
         if rank == 0:
             print(
