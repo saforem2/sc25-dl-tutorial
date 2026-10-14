@@ -31,14 +31,19 @@ fi
 source "$VENV_DIR/bin/activate"
 which python3
 
-# tensorboard is the one runtime dependency the frameworks env lacks;
-# install it into the local venv (via the ALCF proxy) only if missing
-if ! python3 -c "import tensorboard" 2>/dev/null; then
+# a few of train.py's runtime dependencies are not in the frameworks env
+# (tensorboard for SummaryWriter, ruamel.yaml for utils/YParams); install
+# whatever is missing into the local venv, via the ALCF proxy
+NEED_PIP=()
+python3 -c "import tensorboard" 2>/dev/null || NEED_PIP+=(tensorboard)
+python3 -c "import ruamel.yaml" 2>/dev/null || NEED_PIP+=(ruamel.yaml)
+if [ "${#NEED_PIP[@]}" -gt 0 ]; then
     export http_proxy="${http_proxy:-http://proxy.alcf.anl.gov:3128}"
     export https_proxy="${https_proxy:-http://proxy.alcf.anl.gov:3128}"
     export HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"
     export HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"
-    python3 -m pip install -q tensorboard || exit 1
+    echo "pip-installing into venv: ${NEED_PIP[*]}"
+    python3 -m pip install -q "${NEED_PIP[@]}" || exit 1
 fi
 
 export CCL_LOG_LEVEL=warn
