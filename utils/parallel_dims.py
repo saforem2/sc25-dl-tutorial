@@ -10,10 +10,6 @@ defaults (``dp_replicate=1``, ``dp_shard=-1``) give a single flat,
 fully-sharded dp dimension.
 """
 
-import torch
-from torch.distributed.device_mesh import init_device_mesh
-
-
 def resolve_dp_degrees(world_size, tp, dp_replicate=1, dp_shard=-1):
     """Resolve and validate the ``(dp_replicate, dp_shard)`` degrees.
 
@@ -95,6 +91,11 @@ class ParallelDims:
 
             init_fn = ezpz.init_device_mesh_safe
         else:
+            # imported here, not at module level: the degree bookkeeping
+            # in this module is pure Python, and tests/test_parallel_dims
+            # must be able to import it on machines without torch
+            from torch.distributed.device_mesh import init_device_mesh
+
             init_fn = init_device_mesh
         if self.dp_replicate > 1:
             self.mesh = init_fn(
