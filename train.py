@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import random
 import numpy as np
 import argparse
 
@@ -21,7 +22,13 @@ from utils import get_data_loader_distributed
 from utils.loss import l2_loss, l2_loss_opt
 from utils.metrics import weighted_rmse
 from utils.plots import generate_images
+from utils.parallel_dims import ParallelDims, validate_tp_for_vit
 from networks import vit
+from networks.tensor_parallel import (
+    apply_fsdp2,
+    mixed_precision_policy,
+    parallelize_vit,
+)
 
 
 def train(params, args, local_rank, world_rank, world_size):
@@ -29,6 +36,21 @@ def train(params, args, local_rank, world_rank, world_size):
     torch.backends.cudnn.benchmark = True
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda:%d" % local_rank)
+
+    # Data-parallel degree. With tensor parallelism, every rank in a tp
+    # group processes the *same* batch and produces the same (replicated)
+    # loss, so loss/metric reductions and their divisors must use the dp
+    # degree/group, not the world size -- reducing over the world would
+    # count each sample tp times. Without tp these are exactly the world
+    # size / world group, i.e. the original behaviour.
+    dp_size = getattr(args, "dp_size", world_size)
+    dp_group = getattr(args, "dp_group", None)
+
+    def all_reduce(tensor):
+        if dp_group is not None:
+            torch.distributed.all_reduce(tensor, group=dp_group)
+        else:
+            torch.distributed.all_reduce(tensor)
 
     # get data loader
     logging.info("rank %d, begin data loader init" % world_rank)
@@ -43,12 +65,41 @@ def train(params, args, local_rank, world_rank, world_size):
     # create model
     model = vit.ViT(params).to(device)
 
+    # Tensor parallelism (networks/tensor_parallel.py, adapted from ezpz's
+    # fsdp_tp example) replaces the DDP wrap: the model is first sharded
+    # over the tp mesh with parallelize_module, then sharded over the dp
+    # mesh with FSDP2 (fully_shard). FSDP2 is also available on its own via
+    # --fsdp. Note this does *not* use the hand-rolled distributed layers
+    # from train_mp.py -- utils.comm is never initialized here, so vit.py
+    # builds its plain Attention/MLP modules, which is what the DTensor
+    # plans expect.
+    tp_size = getattr(args, "tensor_parallel", 1)
+    use_fsdp = params.distributed and (tp_size > 1 or getattr(args, "fsdp", False))
+    if use_fsdp:
+        if tp_size > 1:
+            assert float(params.dropout) == 0.0, (
+                "tensor parallelism currently requires dropout=0.0: dropout "
+                "on activations that are replicated across the tp group "
+                "(pos_drop, attn.proj_drop, mlp's second drop) would use a "
+                "different mask on each tp rank and silently desynchronize "
+                "the group. Synchronized (tp-aware) dropout is future work."
+            )
+            model = parallelize_vit(model, args.parallel_dims.tp_mesh)
+        model = apply_fsdp2(
+            model,
+            args.parallel_dims.fsdp_mesh,
+            mp_policy=mixed_precision_policy(params.amp_dtype),
+            reshard_after_forward=(
+                getattr(args, "reshard_after_forward", "always") == "always"
+            ),
+        )
+
     if params.enable_jit:
         model = torch.compile(model)
 
     if params.amp_dtype == torch.float16:
         scaler = GradScaler("cuda")
-    if params.distributed and not args.noddp:
+    if params.distributed and not args.noddp and not use_fsdp:
         if args.disable_broadcast_buffers:
             model = DistributedDataParallel(
                 model,
@@ -108,14 +159,14 @@ def train(params, args, local_rank, world_rank, world_size):
         val_loss = loss_func(gen, tar)
         val_rmse = weighted_rmse(gen, tar)
         if params.distributed:
-            torch.distributed.all_reduce(tr_loss)
-            torch.distributed.all_reduce(val_loss)
-            torch.distributed.all_reduce(val_rmse)
+            all_reduce(tr_loss)
+            all_reduce(val_loss)
+            all_reduce(val_rmse)
         if world_rank == 0:
-            args.tboard_writer.add_scalar("Loss/train", tr_loss.item() / world_size, 0)
-            args.tboard_writer.add_scalar("Loss/valid", val_loss.item() / world_size, 0)
+            args.tboard_writer.add_scalar("Loss/train", tr_loss.item() / dp_size, 0)
+            args.tboard_writer.add_scalar("Loss/valid", val_loss.item() / dp_size, 0)
             args.tboard_writer.add_scalar(
-                "RMSE(u10m)/valid", val_rmse.cpu().numpy()[0] / world_size, 0
+                "RMSE(u10m)/valid", val_rmse.cpu().numpy()[0] / dp_size, 0
             )
 
     params.num_epochs = params.num_iters // len(train_data_loader)
@@ -172,8 +223,8 @@ def train(params, args, local_rank, world_rank, world_size):
                 torch.cuda.nvtx.range_pop()  # optimizer
 
             if params.distributed:
-                torch.distributed.all_reduce(loss)
-            tr_loss.append(loss.item() / world_size)
+                all_reduce(loss)
+            tr_loss.append(loss.item() / dp_size)
 
             torch.cuda.nvtx.range_pop()  # step
             # lr step
@@ -227,10 +278,10 @@ def train(params, args, local_rank, world_rank, world_size):
                     valid_steps += 1
 
                 if params.distributed:
-                    torch.distributed.all_reduce(val_loss)
-                    val_loss /= world_size
-                    torch.distributed.all_reduce(val_rmse)
-                    val_rmse /= world_size
+                    all_reduce(val_loss)
+                    val_loss /= dp_size
+                    all_reduce(val_rmse)
+                    val_rmse /= dp_size
 
         val_rmse /= valid_steps  # Avg validation rmse
         val_loss /= valid_steps
@@ -311,6 +362,53 @@ if __name__ == "__main__":
     parser.add_argument(
         "--noddp", action="store_true", help="disable DDP communication"
     )
+
+    # tensor parallelism / FSDP2 arguments (see networks/tensor_parallel.py
+    # and utils/parallel_dims.py). --tensor_parallel > 1 implies --fsdp.
+    parser.add_argument(
+        "--tensor_parallel",
+        "--tp",
+        default=1,
+        type=int,
+        help="number of GPUs for tensor parallelism (DTensor, FSDP2-based)",
+    )
+    parser.add_argument(
+        "--dp_replicate",
+        default=1,
+        type=int,
+        help="data-parallel replication degree for HSDP "
+        "(dp = dp_replicate * dp_shard); FSDP2 path only",
+    )
+    parser.add_argument(
+        "--dp_shard",
+        default=-1,
+        type=int,
+        help="data-parallel sharding degree for HSDP; -1 (default) uses "
+        "all remaining ranks. FSDP2 path only",
+    )
+    parser.add_argument(
+        "--fsdp",
+        action="store_true",
+        help="use FSDP2 (fully_shard) over the data-parallel mesh instead "
+        "of DDP; implied by --tensor_parallel > 1",
+    )
+    parser.add_argument(
+        "--reshard_after_forward",
+        default="always",
+        type=str,
+        choices=["always", "never"],
+        help="FSDP2 reshard policy: 'always' (ZeRO-3 style, default) "
+        "re-shards parameters after forward; 'never' (ZeRO-2 style) keeps "
+        "them gathered. FSDP2 path only",
+    )
+    parser.add_argument(
+        "--seed",
+        default=None,
+        type=int,
+        help="seed for model initialization; defaults to 0 when tensor "
+        "parallelism is enabled, since all tp ranks must start from "
+        "identical weights (DDP's rank-0 broadcast no longer does this)",
+    )
     args = parser.parse_args()
 
     run_num = args.run_num
@@ -361,17 +459,77 @@ if __name__ == "__main__":
         world_rank = torch.distributed.get_rank()
         local_rank = int(os.environ["LOCAL_RANK"])
 
+    # Work out the parallel layout. Ranks are arranged as dp x tp, with tp
+    # innermost (contiguous ranks, normally within a node). The dp degree
+    # -- *not* the world size -- determines how the global batch and the
+    # dataset are split: every rank in a tp group must see the same batch.
+    use_fsdp_path = params.distributed and (args.tensor_parallel > 1 or args.fsdp)
+    if args.tensor_parallel > 1 and not params.distributed:
+        parser.error(
+            "--tensor_parallel > 1 requires a distributed launch (WORLD_SIZE > 1)"
+        )
+    if (args.dp_replicate != 1 or args.dp_shard != -1) and not (
+        args.tensor_parallel > 1 or args.fsdp
+    ):
+        logging.warning(
+            "--dp_replicate/--dp_shard only apply to the FSDP2 path "
+            "(--tensor_parallel > 1 or --fsdp); ignoring them"
+        )
+        args.dp_replicate, args.dp_shard = 1, -1
+    if args.seed is None and args.tensor_parallel > 1:
+        args.seed = 0
+    parallel_dims = ParallelDims(
+        world_size,
+        tp=args.tensor_parallel,
+        dp_replicate=args.dp_replicate,
+        dp_shard=args.dp_shard,
+    )
+    args.parallel_dims = parallel_dims
+    args.dp_size = parallel_dims.dp
+    args.dp_group = None
+    args.dp_rank = world_rank
+    if args.tensor_parallel > 1:
+        validate_tp_for_vit(
+            embed_dim=params.embed_dim,
+            num_heads=params.num_heads,
+            mlp_ratio=4,  # hard-coded in networks.vit.ViT()
+            patch_size=params.patch_size,
+            out_chans=params.n_out_channels,
+            tp=args.tensor_parallel,
+        )
+    if use_fsdp_path:
+        parallel_dims.build_mesh(device_type="cuda")
+        args.dp_group = parallel_dims.dp_group
+        args.dp_rank = parallel_dims.dp_rank
+        if world_rank == 0:
+            logging.info(
+                "Parallel layout: tp=%d, dp_replicate=%d, dp_shard=%d (dp=%d), "
+                "world_size=%d",
+                parallel_dims.tp,
+                parallel_dims.dp_replicate,
+                parallel_dims.dp_shard,
+                parallel_dims.dp,
+                world_size,
+            )
+    dp_size = parallel_dims.dp
+
     if args.local_batch_size:
         # Manually override batch size
         params.local_batch_size = args.local_batch_size
-        params.update({"global_batch_size": world_size * args.local_batch_size})
+        params.update({"global_batch_size": dp_size * args.local_batch_size})
     else:
-        # Compute local batch size based on number of ranks
-        params.local_batch_size = params.global_batch_size // world_size
+        # Compute local batch size based on the number of *data-parallel*
+        # ranks (tp ranks share the same samples)
+        assert params.global_batch_size % dp_size == 0, (
+            f"global_batch_size ({params.global_batch_size}) must be divisible "
+            f"by the data-parallel degree ({dp_size})"
+        )
+        params.local_batch_size = params.global_batch_size // dp_size
 
-    # for dali data loader, set the actual number of data shards and id
-    params.data_num_shards = world_size
-    params.data_shard_id = world_rank
+    # for the data loaders, set the actual number of data shards and id:
+    # shards are indexed by dp rank, so tp peers load identical batches
+    params.data_num_shards = dp_size
+    params.data_shard_id = args.dp_rank
 
     # Set up directory
     baseDir = params.expdir
@@ -388,6 +546,14 @@ if __name__ == "__main__":
         args.tboard_writer = SummaryWriter(log_dir=os.path.join(expDir, "logs/"))
 
     params.experiment_dir = os.path.abspath(expDir)
+
+    if args.seed is not None:
+        # all ranks use the same seed: under tensor parallelism every tp
+        # rank must construct identical (pre-shard) weights, and nothing
+        # broadcasts them the way DDP does
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
 
     train(params, args, local_rank, world_rank, world_size)
 
