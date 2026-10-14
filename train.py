@@ -31,11 +31,55 @@ from networks.tensor_parallel import (
 )
 
 
+def detect_device_type(requested="auto"):
+    """Pick the accelerator to train on: an explicit request wins, else
+    CUDA if present, else XPU, else CPU."""
+    if requested != "auto":
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu"
+    return "cpu"
+
+
+def default_backend(device_type):
+    if device_type == "cuda":
+        return "nccl"
+    if device_type == "xpu":
+        # native XPU builds register oneCCL as "xccl"; IPEX builds used "ccl"
+        if hasattr(torch.distributed, "is_xccl_available") and (
+            torch.distributed.is_xccl_available()
+        ):
+            return "xccl"
+        return "ccl"
+    return "gloo"
+
+
 def train(params, args, local_rank, world_rank, world_size):
     # set device and benchmark mode
-    torch.backends.cudnn.benchmark = True
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda:%d" % local_rank)
+    device_type = args.device_type
+    if device_type == "cuda":
+        torch.backends.cudnn.benchmark = True
+    if device_type in ("cuda", "xpu"):
+        device_mod = getattr(torch, device_type)
+        device_index = local_rank % device_mod.device_count()
+        device_mod.set_device(device_index)
+        device = torch.device(device_type, device_index)
+    else:
+        device = torch.device("cpu")
+
+    def device_sync():
+        mod = getattr(torch, device_type, None)
+        if mod is not None and hasattr(mod, "synchronize"):
+            mod.synchronize()
+
+    # NVTX ranges only exist on CUDA; make them no-ops elsewhere
+    if device_type == "cuda":
+        nvtx_push = nvtx_push
+        nvtx_pop = nvtx_pop
+    else:
+        nvtx_push = nvtx_pop = lambda *a, **k: None
 
     # Data-parallel degree. With tensor parallelism, every rank in a tp
     # group processes the *same* batch and produces the same (replicated)
@@ -98,19 +142,19 @@ def train(params, args, local_rank, world_rank, world_size):
         model = torch.compile(model)
 
     if params.amp_dtype == torch.float16:
-        scaler = GradScaler("cuda")
+        scaler = GradScaler(device_type)
     if params.distributed and not args.noddp and not use_fsdp:
         if args.disable_broadcast_buffers:
             model = DistributedDataParallel(
                 model,
-                device_ids=[local_rank],
+                device_ids=[device.index] if device.type != 'cpu' else None,
                 bucket_cap_mb=args.bucket_cap_mb,
                 broadcast_buffers=False,
                 gradient_as_bucket_view=True,
             )
         else:
             model = DistributedDataParallel(
-                model, device_ids=[local_rank], bucket_cap_mb=args.bucket_cap_mb
+                model, device_ids=[device.index] if device.type != 'cpu' else None, bucket_cap_mb=args.bucket_cap_mb
             )
 
     if params.enable_fused:
@@ -173,7 +217,7 @@ def train(params, args, local_rank, world_rank, world_size):
     iters = 0
     t1 = time.time()
     for epoch in range(startEpoch, startEpoch + params.num_epochs):
-        torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
+        device_sync()  # device sync to ensure accurate epoch timings
         if params.distributed and (train_sampler is not None):
             train_sampler.set_epoch(epoch)
         start = time.time()
@@ -186,47 +230,47 @@ def train(params, args, local_rank, world_rank, world_size):
         step_count = 0
         for i, data in enumerate(train_data_loader, 0):
             if world_rank == 0:
-                if epoch == 3 and i == 0:
+                if device_type == "cuda" and epoch == 3 and i == 0:
                     torch.cuda.profiler.start()
-                if epoch == 3 and i == len(train_data_loader) - 1:
+                if device_type == "cuda" and epoch == 3 and i == len(train_data_loader) - 1:
                     torch.cuda.profiler.stop()
 
-            torch.cuda.nvtx.range_push(f"step {i}")
+            nvtx_push(f"step {i}")
             iters += 1
             dat_start = time.time()
-            torch.cuda.nvtx.range_push(f"data copy in {i}")
+            nvtx_push(f"data copy in {i}")
 
             inp, tar = map(lambda x: x.to(device), data)
-            torch.cuda.nvtx.range_pop()  # copy in
+            nvtx_pop()  # copy in
 
             tr_start = time.time()
             b_size = inp.size(0)
 
             optimizer.zero_grad()
 
-            torch.cuda.nvtx.range_push(f"forward")
-            with autocast("cuda", enabled=params.amp_enabled, dtype=params.amp_dtype):
+            nvtx_push(f"forward")
+            with autocast(device_type, enabled=params.amp_enabled, dtype=params.amp_dtype):
                 gen = model(inp)
                 loss = loss_func(gen, tar)
-            torch.cuda.nvtx.range_pop()  # forward
+            nvtx_pop()  # forward
 
             if params.amp_dtype == torch.float16:
                 scaler.scale(loss).backward()
-                torch.cuda.nvtx.range_push(f"optimizer")
+                nvtx_push(f"optimizer")
                 scaler.step(optimizer)
-                torch.cuda.nvtx.range_pop()  # optimizer
+                nvtx_pop()  # optimizer
                 scaler.update()
             else:
                 loss.backward()
-                torch.cuda.nvtx.range_push(f"optimizer")
+                nvtx_push(f"optimizer")
                 optimizer.step()
-                torch.cuda.nvtx.range_pop()  # optimizer
+                nvtx_pop()  # optimizer
 
             if params.distributed:
                 all_reduce(loss)
             tr_loss.append(loss.item() / dp_size)
 
-            torch.cuda.nvtx.range_pop()  # step
+            nvtx_pop()  # step
             # lr step
             scheduler.step()
 
@@ -235,7 +279,7 @@ def train(params, args, local_rank, world_rank, world_size):
             dat_time += tr_start - dat_start
             step_count += 1
 
-        torch.cuda.synchronize()  # device sync to ensure accurate epoch timings
+        device_sync()  # device sync to ensure accurate epoch timings
         end = time.time()
 
         if world_rank == 0:
@@ -269,7 +313,7 @@ def train(params, args, local_rank, world_rank, world_size):
             with torch.no_grad():
                 for i, data in enumerate(val_data_loader, 0):
                     with autocast(
-                        "cuda", enabled=params.amp_enabled, dtype=params.amp_dtype
+                        device_type, enabled=params.amp_enabled, dtype=params.amp_dtype
                     ):
                         inp, tar = map(lambda x: x.to(device), data)
                         gen = model(inp)
@@ -409,7 +453,16 @@ if __name__ == "__main__":
         "parallelism is enabled, since all tp ranks must start from "
         "identical weights (DDP's rank-0 broadcast no longer does this)",
     )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        type=str,
+        choices=["auto", "cuda", "xpu", "cpu"],
+        help="device to train on (default: auto = cuda if available, "
+        "else xpu, else cpu)",
+    )
     args = parser.parse_args()
+    args.device_type = detect_device_type(args.device)
 
     run_num = args.run_num
 
@@ -455,9 +508,17 @@ if __name__ == "__main__":
     world_rank = 0
     local_rank = 0
     if params.distributed:
-        torch.distributed.init_process_group(backend="nccl", init_method="env://")
+        torch.distributed.init_process_group(
+            backend=default_backend(args.device_type), init_method="env://"
+        )
         world_rank = torch.distributed.get_rank()
         local_rank = int(os.environ["LOCAL_RANK"])
+    if world_rank == 0:
+        logging.info(
+            "Device: %s (process-group backend: %s)",
+            args.device_type,
+            default_backend(args.device_type),
+        )
 
     # Work out the parallel layout. Ranks are arranged as dp x tp, with tp
     # innermost (contiguous ranks, normally within a node). The dp degree
@@ -498,7 +559,7 @@ if __name__ == "__main__":
             tp=args.tensor_parallel,
         )
     if use_fsdp_path:
-        parallel_dims.build_mesh(device_type="cuda")
+        parallel_dims.build_mesh(device_type=args.device_type)
         args.dp_group = parallel_dims.dp_group
         args.dp_rank = parallel_dims.dp_rank
         if world_rank == 0:

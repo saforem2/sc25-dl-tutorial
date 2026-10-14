@@ -160,3 +160,29 @@ mp_bs32:
 mp_patch4:
   <<: *mp
   patch_size: 4
+
+# DTensor smoke config for train.py (see networks/tensor_parallel.py):
+# mp-sized model (embed_dim 1024) on the small synthetic ERA5 subset from
+# tests/make_synthetic_era5.py, with portable settings (pytorch loader, no
+# AMP / fused optimizer / JIT) so it runs on CUDA, XPU and CPU alike.
+# With tp=4 on one node (dp=1): 2 epochs of 8 steps.
+mp_smoke_dt:
+  <<: *mp
+  data_loader_config: 'pytorch'
+  amp_mode: 'none'
+  enable_fused: false
+  enable_jit: false
+  num_data_workers: 0
+  img_size: [192, 384]
+  global_batch_size: 8
+  lr: 8.66e-4
+  num_iters: 20
+  limit_nsamples: 64
+  limit_nsamples_val: 32
+  expdir: './logs_dt'
+  train_data_path: './data/synthetic/train'
+  valid_data_path: './data/synthetic/valid'
+  inf_data_path: './data/synthetic/valid'
+  time_means_path: './data/synthetic/stats/time_means.npy'
+  global_means_path: './data/synthetic/stats/global_means.npy'
+  global_stds_path: './data/synthetic/stats/global_stds.npy'
