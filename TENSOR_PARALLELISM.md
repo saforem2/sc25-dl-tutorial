@@ -51,7 +51,7 @@ Notes:
 scripts and the `nersc/pytorch` container, as in the README. No extra
 packages are needed for variant A.
 
-**ALCF Aurora / Sunspot** (Intel XPU, PVC): load the builtin frameworks
+**ALCF Aurora** (Intel XPU, PVC): load the builtin frameworks
 module and layer a workdir-local venv over it -- the PBS scripts below
 do this automatically:
 
