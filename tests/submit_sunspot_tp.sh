@@ -1,72 +1,53 @@
 #!/bin/bash
+# SPDX-License-Identifier: MIT
+#
+# PBS job: run the tensor-parallel tests on Sunspot (Intel XPU / PVC).
+#
+#   cd ~/tp-test-clone && qsub tests/submit_sunspot_tp.sh
+#
+# Uses the frameworks RC environment (~/rc_env.sh: modules + conda env with
+# PyTorch built for XPU) plus the rc4-ezpz venv layered on top of it.
+# Runs tests/test_parallel_dims.py (unit tests, single process) and
+# tests/check_tp_equivalence.py under torchrun at TP=2 (world 2) and
+# TP=2 x DP=2 (world 4).
 #PBS -N vit-tp-xpu
+#PBS -A datascience
+#PBS -q workq
 #PBS -l select=1
 #PBS -l walltime=00:30:00
-#PBS -l filesystems=home
-#PBS -q debug
-#PBS -S /bin/bash
-#
-# Run the tensor-parallel (DTensor + FSDP2) correctness tests on Sunspot's
-# Intel Data Center GPU Max (XPU) devices.
-#
-# Submit with your allocation and queue, e.g.:
-#
-#   qsub -A <project> -q <queue> tests/submit_sunspot_tp.sh
-#
-# (the #PBS -q above is just a default; -A has no sensible default and must
-# be supplied here or added as a #PBS -A line.)
-#
-# Knobs (environment, pass with `qsub -v TP=2,DP=2`):
-#   TP, DP          tensor/data parallel degrees for the equivalence check
-#   PYTORCH_MODULE  module to load for PyTorch (default below); the script
-#                   prints `module list` and the torch/XPU versions it found
-#
-# Scope: this validates the TP sharding + FSDP2 machinery from train.py
-# (networks/tensor_parallel.py, utils/parallel_dims.py, the TP-aware
-# Attention in networks/vit.py) on XPU -- forward/backward equivalence
-# against the single-process model, including the oneCCL backend and an
-# "xpu" DeviceMesh. train.py itself is still CUDA-targeted (it is the
-# Perlmutter tutorial script); porting its training loop to XPU is separate
-# from validating the parallelization code.
-set -ux
+#PBS -j oe
 
-cd "${PBS_O_WORKDIR:-$PWD}"
+set -x
+cd "${PBS_O_WORKDIR:-$HOME/tp-test-clone}" || exit 1
 
-# --- software environment -------------------------------------------------
-module purge 2>/dev/null || true
-module use /soft/modulefiles 2>/dev/null || true
-module load "${PYTORCH_MODULE:-pytorch/2.7.1}" || {
-    echo "!! could not load PYTORCH_MODULE=${PYTORCH_MODULE:-pytorch/2.7.1}"
-    echo "!! available pytorch modules:"
-    module avail pytorch 2>&1 | tail -20
-    exit 1
-}
-module list
-
-which python
-python -c "import torch; print('torch:', torch.__version__); \
-print('xpu available:', torch.xpu.is_available()); \
-print('xpu devices:', torch.xpu.device_count())"
-python -c "import torch; assert torch.xpu.is_available(), 'no XPU visible'; \
-assert torch.xpu.device_count() >= 2, 'need >= 2 XPU devices (tiles) for TP'"
-
-# oneCCL is the XPU distributed backend; keep its logging quiet unless debugging
-export CCL_LOG_LEVEL="${CCL_LOG_LEVEL:-warn}"
-# pin each spawned rank to a distinct tile: the check assigns devices itself
-# (rank % device_count), so make sure no affinity mask hides tiles from it
-unset ZE_AFFINITY_MASK || true
+# --- environment (frameworks RC: oneAPI + PyTorch for XPU) -------------------
+source "$HOME/rc_env.sh"
+source "$HOME/venvs/rc4-ezpz/bin/activate"
+which python3
 
 export DEVICE=xpu
+export CCL_LOG_LEVEL=warn
+unset ZE_AFFINITY_MASK
 
-# --- tests ------------------------------------------------------------------
-# 1. pure-bookkeeping unit tests (parallel degree resolution / validation)
-python -m unittest tests.test_parallel_dims -v
+python3 - <<'PYEOF' || { echo "XPU check failed"; exit 1; }
+import torch
 
-# 2. forward/backward equivalence: tp=2, dp=1 (2 ranks on 2 tiles)
-TP="${TP:-2}" DP="${DP:-1}" python tests/check_tp_equivalence.py
+print(f"torch {torch.__version__}")
+assert torch.xpu.is_available(), "torch.xpu is not available on this node"
+n = torch.xpu.device_count()
+print(f"xpu devices visible: {n}")
+assert n >= 4, f"need >= 4 XPU devices for the TP=2 x DP=2 run, got {n}"
+PYEOF
 
-# 3. 2-D mesh: tp=2, dp=2 (4 ranks) -- also exercises FSDP2 grad averaging
-#    over the dp mesh and the dp-group reductions train.py now uses
-TP=2 DP=2 python tests/check_tp_equivalence.py
+echo "================ unit tests ================"
+python3 -m unittest tests.test_parallel_dims -v || exit 1
+
+echo "================ equivalence: TP=2, DP=1 (world 2) ================"
+TP=2 DP=1 torchrun --standalone --nproc_per_node=2 \
+    tests/check_tp_equivalence.py || exit 1
+
+echo "================ equivalence: TP=2, DP=2 (world 4) ================"
+TP=2 DP=2 torchrun --standalone --nproc_per_node=4 \
+    tests/check_tp_equivalence.py || exit 1
 
 echo "SUNSPOT TP TESTS: ALL PASSED"
