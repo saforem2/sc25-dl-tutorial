@@ -18,8 +18,14 @@ Exits non-zero (via the spawned workers) if any check fails.
 """
 
 import os
+import sys
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
+
+# make the repo root importable no matter how this file is launched
+# (torchrun/mpiexec put this file's directory, not the cwd, on sys.path)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.distributed as dist
