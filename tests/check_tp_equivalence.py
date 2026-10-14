@@ -62,7 +62,19 @@ def full(t):
     return t.full_tensor() if hasattr(t, "full_tensor") else t
 
 
-BACKENDS = {"cpu": "gloo", "cuda": "nccl", "xpu": "ccl"}
+def default_backend(device_type):
+    if device_type == "cuda":
+        return "nccl"
+    if device_type == "xpu":
+        # native XPU builds register oneCCL as "xccl"; older IPEX-based
+        # builds called it "ccl"
+        if hasattr(dist, "is_xccl_available") and dist.is_xccl_available():
+            return "xccl"
+        return "ccl"
+    return "gloo"
+
+
+BACKENDS = {dt: default_backend(dt) for dt in ("cpu", "cuda", "xpu")}
 
 
 def worker(rank, world_size, tp, tmpfile):
