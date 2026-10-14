@@ -488,6 +488,47 @@ Quick questions:
 - *What if you did not use DDP and directly called `torch.distributed.all_reduce` before the optimizer step to sync gradients? What would you expect to see in the profile?*
 
 
+## Tensor parallelism with DTensor + FSDP2 (`train.py`)
+
+`train.py` also supports tensor parallelism based on PyTorch's native
+DTensor APIs, adapted from the
+[ezpz `fsdp_tp` example](https://github.com/saforem2/ezpz/blob/main/src/ezpz/examples/fsdp_tp.py).
+This is an alternative to the hand-rolled model-parallel implementation in
+`train_mp.py` below: each transformer block is sharded over a tensor-parallel
+(`tp`) device mesh with `parallelize_module` (attention `q`/`k`/`v` and MLP
+`fc1` column-wise, `attn.proj` and MLP `fc2` row-wise -- see
+`networks/tensor_parallel.py`), and the sharded blocks are then wrapped with
+FSDP2 (`fully_shard`) over the data-parallel (`dp`) mesh. Ranks form a
+`dp x tp` grid, so the total number of GPUs is `dp * tp`, and the global
+batch is split across `dp` only (every rank in a `tp` group sees the same
+batch).
+
+```
+# 4-way tensor parallel + 4-way data parallel on 16 GPUs (4 nodes)
+sbatch --nodes 4 submit_pm.sh --config=mp_short --tensor_parallel=4 --run_num=tp4
+```
+
+Useful flags (all on `train.py`):
+
+- `--tensor_parallel N` (alias `--tp`): tensor-parallel degree; must divide
+  the number of attention heads, `embed_dim`, the MLP hidden dim, and the
+  head output dim. Implies `--fsdp`.
+- `--fsdp`: use FSDP2 over the dp mesh instead of DDP, even with
+  `--tensor_parallel=1`.
+- `--dp_replicate N` / `--dp_shard N`: split dp into replication and
+  sharding degrees (HSDP); `dp_shard=-1` (default) uses all remaining ranks.
+- `--reshard_after_forward {always,never}`: FSDP2 reshard policy
+  (`always` = ZeRO-3 style, `never` = ZeRO-2 style).
+
+Current limitations: dropout must be `0.0` (the default in `config/ViT.yaml`)
+because dropout on tp-replicated activations is not yet synchronized across
+the tp group, and sequence parallelism is not included -- the norms stay
+replicated. Correctness is covered by `tests/test_parallel_dims.py` and by
+`tests/check_tp_equivalence.py`, which checks forward/backward equivalence
+against the single-process model. The equivalence check is device-agnostic
+(`DEVICE=cpu|cuda|xpu`); on ALCF Sunspot, `tests/submit_sunspot_tp.sh` runs
+the full test set on Intel XPU devices via `qsub`.
+
 ## Model parallelism
 
 Now that we are familiar with distributed data parallel training, we are ready to move to more advanced parallelism in the form of model parallelism. One of the main motivations to explore this dimension is the need to use a larger model and/or process higher resolution images: both these can lead to higher accuracies and/or better emulation of physical phenomena. However, they will inflate the memory consumption (activation and weights) as well as computational cost.  At some point, the model (activation and weights) will no longer fit on a single GPU and we need to partition/shard the model across multiple GPUs.
