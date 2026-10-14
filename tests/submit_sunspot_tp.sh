@@ -27,7 +27,10 @@ cd "${PBS_O_WORKDIR:-$HOME/tp-test-clone}" || exit 1
 # compute nodes; everything below lives under the job's working directory)
 module load "${FRAMEWORKS_MODULE:-frameworks/2026.1.0}"
 VENV_DIR="${TP_VENV:-$PWD/.venv}"
-if [ ! -x "$VENV_DIR/bin/python3" ]; then
+# (re)build the venv if it is missing or incomplete -- e.g. left
+# half-created by an interrupted or concurrent job in the same workdir
+if ! "$VENV_DIR/bin/python3" -c "import torch" 2>/dev/null; then
+    rm -rf "$VENV_DIR"
     python3 -m venv --system-site-packages "$VENV_DIR" || exit 1
 fi
 source "$VENV_DIR/bin/activate"
