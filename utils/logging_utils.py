@@ -4,14 +4,25 @@ import logging
 _format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 
-def slurm_filter(record):
-    return int(os.environ["SLURM_PROCID"]) == 0
+def rank_zero_filter(record):
+    """Only let rank 0 log. The global rank comes from whichever launcher
+    is in use -- SLURM (SLURM_PROCID), torchrun (RANK) or MPI (PMI_RANK) --
+    and defaults to 0 for single-process runs. (Previously this read
+    SLURM_PROCID unconditionally and crashed under any other launcher.)"""
+    for var in ("SLURM_PROCID", "RANK", "PMI_RANK"):
+        if var in os.environ:
+            return int(os.environ[var]) == 0
+    return True
+
+
+# backwards-compatible alias (older name referred to the SLURM variable)
+slurm_filter = rank_zero_filter
 
 
 def config_logger(log_level=logging.INFO):
     logging.basicConfig(format=_format, level=log_level)
     root_logger = logging.getLogger()
-    root_logger.addFilter(slurm_filter)
+    root_logger.addFilter(rank_zero_filter)
 
 
 def log_to_file(
