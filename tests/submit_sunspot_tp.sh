@@ -14,6 +14,7 @@
 #PBS -A datascience
 #PBS -q workq
 #PBS -l select=1
+#PBS -l filesystems=home
 #PBS -l walltime=00:30:00
 #PBS -j oe
 
