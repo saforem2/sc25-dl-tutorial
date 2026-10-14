@@ -529,6 +529,24 @@ against the single-process model. The equivalence check is device-agnostic
 (`DEVICE=cpu|cuda|xpu`); on ALCF Sunspot, `tests/submit_sunspot_tp.sh` runs
 the full test set on Intel XPU devices via `qsub`.
 
+`train.py` itself picks its device with `--device {auto,cuda,xpu,cpu}`
+(auto-detect by default) and uses the matching process-group backend
+(nccl / xccl / gloo), autocast device and synchronization, so the same
+command runs on Perlmutter (CUDA) and Sunspot (XPU). A self-contained
+smoke run of the full training loop -- mp-sized model (embed_dim 1024),
+`tp=4`, synthetic ERA5 subset from `tests/make_synthetic_era5.py`, config
+`mp_smoke_dt` in `config/ViT.yaml` -- is scripted for Sunspot in
+`tests/submit_sunspot_train_tp.sh`:
+
+```bash
+cd ~/tp-test-clone && qsub tests/submit_sunspot_train_tp.sh
+# equivalently, by hand:
+python3 tests/make_synthetic_era5.py --out ./data/synthetic
+torchrun --standalone --nproc_per_node=4 \
+    train.py --yaml_config=./config/ViT.yaml --config=mp_smoke_dt \
+             --tensor_parallel=4 --device=xpu --run_num=tp4
+```
+
 ## Model parallelism
 
 Now that we are familiar with distributed data parallel training, we are ready to move to more advanced parallelism in the form of model parallelism. One of the main motivations to explore this dimension is the need to use a larger model and/or process higher resolution images: both these can lead to higher accuracies and/or better emulation of physical phenomena. However, they will inflate the memory consumption (activation and weights) as well as computational cost.  At some point, the model (activation and weights) will no longer fit on a single GPU and we need to partition/shard the model across multiple GPUs.
