@@ -55,8 +55,11 @@ if [ ! -f data/synthetic/train/data_2000.h5 ]; then
 fi
 ls -lh data/synthetic/train data/synthetic/valid data/synthetic/stats
 
+# NOTE: `python3 -m torch.distributed.run`, not the `torchrun` script --
+# the frameworks module's torchrun shebang points at the module python
+# and would bypass this venv (and its extra packages) entirely.
 echo "================ train.py --config=mp_smoke_dt --tensor_parallel=4 ================"
-torchrun --standalone --nproc_per_node=4 \
+python3 -m torch.distributed.run --standalone --nproc_per_node=4 \
     train.py --yaml_config=./config/ViT.yaml --config=mp_smoke_dt \
              --tensor_parallel=4 --device=xpu --run_num=tp4 || exit 1
 

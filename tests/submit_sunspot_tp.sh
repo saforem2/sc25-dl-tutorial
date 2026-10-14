@@ -54,12 +54,15 @@ PYEOF
 echo "================ unit tests ================"
 python3 -m unittest tests.test_parallel_dims -v || exit 1
 
+# NOTE: launch via `python3 -m torch.distributed.run`, not the `torchrun`
+# script -- the frameworks module's torchrun has a shebang pointing at
+# the module's python and would bypass this venv entirely.
 echo "================ equivalence: TP=2, DP=1 (world 2) ================"
-TP=2 DP=1 torchrun --standalone --nproc_per_node=2 \
+TP=2 DP=1 python3 -m torch.distributed.run --standalone --nproc_per_node=2 \
     tests/check_tp_equivalence.py || exit 1
 
 echo "================ equivalence: TP=2, DP=2 (world 4) ================"
-TP=2 DP=2 torchrun --standalone --nproc_per_node=4 \
+TP=2 DP=2 python3 -m torch.distributed.run --standalone --nproc_per_node=4 \
     tests/check_tp_equivalence.py || exit 1
 
 echo "SUNSPOT TP TESTS: ALL PASSED"

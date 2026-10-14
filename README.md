@@ -542,7 +542,7 @@ smoke run of the full training loop -- mp-sized model (embed_dim 1024),
 cd ~/tp-test-clone && qsub tests/submit_sunspot_train_tp.sh
 # equivalently, by hand:
 python3 tests/make_synthetic_era5.py --out ./data/synthetic
-torchrun --standalone --nproc_per_node=4 \
+python3 -m torch.distributed.run --standalone --nproc_per_node=4 \
     train.py --yaml_config=./config/ViT.yaml --config=mp_smoke_dt \
              --tensor_parallel=4 --device=xpu --run_num=tp4
 ```
