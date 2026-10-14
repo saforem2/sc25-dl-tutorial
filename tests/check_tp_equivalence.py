@@ -77,7 +77,7 @@ def default_backend(device_type):
 BACKENDS = {dt: default_backend(dt) for dt in ("cpu", "cuda", "xpu")}
 
 
-def worker(rank, world_size, tp, tmpfile):
+def worker(rank, world_size, tp, init_method):
     device_type = os.environ.get("DEVICE", "cpu")
     backend = BACKENDS[device_type]
     if device_type == "xpu":
@@ -91,7 +91,7 @@ def worker(rank, world_size, tp, tmpfile):
 
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
-    dist.init_process_group(backend, init_method=f"file://{tmpfile}",
+    dist.init_process_group(backend, init_method=init_method,
                             rank=rank, world_size=world_size)
     try:
         if device_type == "cpu":
@@ -178,13 +178,20 @@ def main():
     tp = int(os.environ.get("TP", "2"))
     dp = int(os.environ.get("DP", "1"))
     world_size = tp * dp
-    with tempfile.TemporaryDirectory() as tmpdir:
-        mp.spawn(
-            worker,
-            args=(world_size, tp, os.path.join(tmpdir, "store")),
-            nprocs=world_size,
-            join=True,
-        )
+    if "LOCAL_RANK" in os.environ and "MASTER_ADDR" in os.environ:
+        # launched by torchrun / mpiexec: this process already IS one rank.
+        # (mp.spawn here would double every rank and deadlock the group.)
+        worker(int(os.environ["RANK"]), world_size, tp, "env://")
+    else:
+        # standalone: spawn all ranks from this process, rendezvous via file
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mp.spawn(
+                worker,
+                args=(world_size, tp,
+                      f"file://{os.path.join(tmpdir, 'store')}"),
+                nprocs=world_size,
+                join=True,
+            )
 
 
 if __name__ == "__main__":
