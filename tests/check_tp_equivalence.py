@@ -69,9 +69,13 @@ def worker(rank, world_size, tp, tmpfile):
     device_type = os.environ.get("DEVICE", "cpu")
     backend = BACKENDS[device_type]
     if device_type == "xpu":
-        # oneCCL process-group support lives in this extension package on
-        # Intel builds of PyTorch
-        import intel_extension_for_pytorch  # noqa: F401
+        # older Intel PyTorch builds kept oneCCL support in IPEX; PyTorch
+        # >= 2.5 (incl. the Sunspot frameworks builds) has native XPU +
+        # oneCCL support, so a missing IPEX is fine
+        try:
+            import intel_extension_for_pytorch  # noqa: F401
+        except ImportError:
+            pass
 
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
