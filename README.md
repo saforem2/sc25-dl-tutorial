@@ -547,6 +547,34 @@ python3 -m torch.distributed.run --standalone --nproc_per_node=4 \
              --tensor_parallel=4 --device=xpu --run_num=tp4
 ```
 
+#### ezpz-based variant
+
+The same training run can delegate all of its distributed setup --
+rank/world discovery, device selection, `init_process_group` -- to
+[ezpz](https://github.com/saforem2/ezpz) instead of the built-in
+env-based plumbing: pass `--ezpz` to `train.py` and launch with
+`ezpz launch` (which builds the scheduler-aware `mpiexec` command,
+including CPU binding):
+
+```bash
+pip install "git+https://github.com/saforem2/ezpz"   # NOT the PyPI "ezpz"
+ezpz launch --nproc 4 \
+    python3 train.py --yaml_config=./config/ViT.yaml --config=mp_smoke_dt \
+             --tensor_parallel=4 --ezpz --run_num=tp4ezpz
+# on Sunspot, as a PBS job (same frameworks-module + .venv bootstrap):
+qsub tests/submit_sunspot_train_tp_ezpz.sh
+```
+
+Two implementation notes: `train.py` calls
+`ezpz.distributed.setup_torch(tensor_parallel_size=..., seed=None)`
+(rank-aware seeding would desynchronize tp weight init -- train.py seeds
+identically on all ranks itself), and with `--ezpz` the DeviceMesh is
+built through `ezpz.init_device_mesh_safe`, because ezpz's device-bound
+default process group makes torch take the `split_group` path, which
+xccl does not support on XPU. The two variants are numerically
+identical: on Sunspot both produce train loss 1.1086 -> 1.0085 and val
+loss 1.0180 -> 1.0041 for the `mp_smoke_dt` config above.
+
 ## Model parallelism
 
 Now that we are familiar with distributed data parallel training, we are ready to move to more advanced parallelism in the form of model parallelism. One of the main motivations to explore this dimension is the need to use a larger model and/or process higher resolution images: both these can lead to higher accuracies and/or better emulation of physical phenomena. However, they will inflate the memory consumption (activation and weights) as well as computational cost.  At some point, the model (activation and weights) will no longer fit on a single GPU and we need to partition/shard the model across multiple GPUs.
