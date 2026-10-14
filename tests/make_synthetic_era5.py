@@ -3,7 +3,7 @@
 The real tutorial data is ERA5 .h5 files (one per year, dataset ``fields``
 of shape [samples, channels, H, W]) plus global mean/std .npy stats. This
 writes random-but-deterministic stand-ins so `train.py` can be smoke-tested
-anywhere (e.g. Sunspot) without the multi-GB download:
+anywhere (e.g. Aurora) without the multi-GB download:
 
     python3 tests/make_synthetic_era5.py --out ./data/synthetic
 

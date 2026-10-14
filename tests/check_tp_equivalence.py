@@ -8,11 +8,11 @@ Runs on CPU, CUDA, or Intel XPU (DEVICE=cpu|cuda|xpu):
 
     python tests/check_tp_equivalence.py            # tp=2, dp=1 (2 procs)
     TP=2 DP=2 python tests/check_tp_equivalence.py  # 2-D mesh (4 procs)
-    DEVICE=xpu TP=2 python tests/check_tp_equivalence.py   # Sunspot / PVC
+    DEVICE=xpu TP=2 python tests/check_tp_equivalence.py   # Aurora / PVC
 
 On XPU the distributed backend is oneCCL ("ccl") and the device mesh is
 built with device_type="xpu" -- the same combination train.py's FSDP2 path
-needs off-NVIDIA. See tests/submit_sunspot_tp.sh for the qsub wrapper.
+needs off-NVIDIA. See tests/submit_aurora_tp.sh for the qsub wrapper.
 
 Exits non-zero (via the spawned workers) if any check fails.
 """
@@ -82,7 +82,7 @@ def worker(rank, world_size, tp, init_method):
     backend = BACKENDS[device_type]
     if device_type == "xpu":
         # older Intel PyTorch builds kept oneCCL support in IPEX; PyTorch
-        # >= 2.5 (incl. the Sunspot frameworks builds) has native XPU +
+        # >= 2.5 (incl. the Aurora frameworks builds) has native XPU +
         # oneCCL support, so a missing IPEX is fine
         try:
             import intel_extension_for_pytorch  # noqa: F401

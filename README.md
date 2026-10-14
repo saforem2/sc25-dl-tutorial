@@ -501,7 +501,9 @@ This is an alternative to the hand-rolled model-parallel implementation in
 FSDP2 (`fully_shard`) over the data-parallel (`dp`) mesh. Ranks form a
 `dp x tp` grid, so the total number of GPUs is `dp * tp`, and the global
 batch is split across `dp` only (every rank in a `tp` group sees the same
-batch).
+batch). **Run book:** [TENSOR_PARALLELISM.md](TENSOR_PARALLELISM.md) has
+step-by-step instructions for both launcher variants (standard and
+ezpz-based), expected output, and example configs.
 
 ```
 # 4-way tensor parallel + 4-way data parallel on 16 GPUs (4 nodes).
@@ -530,20 +532,20 @@ the tp group, and sequence parallelism is not included -- the norms stay
 replicated. Correctness is covered by `tests/test_parallel_dims.py` and by
 `tests/check_tp_equivalence.py`, which checks forward/backward equivalence
 against the single-process model. The equivalence check is device-agnostic
-(`DEVICE=cpu|cuda|xpu`); on ALCF Sunspot, `tests/submit_sunspot_tp.sh` runs
+(`DEVICE=cpu|cuda|xpu`); on ALCF Aurora, `tests/submit_aurora_tp.sh` runs
 the full test set on Intel XPU devices via `qsub`.
 
 `train.py` itself picks its device with `--device {auto,cuda,xpu,cpu}`
 (auto-detect by default) and uses the matching process-group backend
 (nccl / xccl / gloo), autocast device and synchronization, so the same
-command runs on Perlmutter (CUDA) and Sunspot (XPU). A self-contained
+command runs on Perlmutter (CUDA) and Aurora (XPU). A self-contained
 smoke run of the full training loop -- mp-sized model (embed_dim 1024),
 `tp=4`, synthetic ERA5 subset from `tests/make_synthetic_era5.py`, config
-`mp_smoke_dt` in `config/ViT.yaml` -- is scripted for Sunspot in
-`tests/submit_sunspot_train_tp.sh`:
+`mp_smoke_dt` in `config/ViT.yaml` -- is scripted for Aurora in
+`tests/submit_aurora_train_tp.sh`:
 
 ```bash
-cd ~/tp-test-clone && qsub tests/submit_sunspot_train_tp.sh
+cd ~/tp-test-clone && qsub tests/submit_aurora_train_tp.sh
 # equivalently, by hand:
 python3 tests/make_synthetic_era5.py --out ./data/synthetic
 python3 -m torch.distributed.run --standalone --nproc_per_node=4 \
@@ -565,8 +567,8 @@ pip install "git+https://github.com/saforem2/ezpz"   # NOT the PyPI "ezpz"
 ezpz launch --nproc 4 \
     python3 train.py --yaml_config=./config/ViT.yaml --config=mp_smoke_dt \
              --tensor_parallel=4 --ezpz --run_num=tp4ezpz
-# on Sunspot, as a PBS job (same frameworks-module + .venv bootstrap):
-qsub tests/submit_sunspot_train_tp_ezpz.sh
+# on Aurora, as a PBS job (same frameworks-module + .venv bootstrap):
+qsub tests/submit_aurora_train_tp_ezpz.sh
 ```
 
 Two implementation notes: `train.py` calls
@@ -576,7 +578,7 @@ identically on all ranks itself), and with `--ezpz` the DeviceMesh is
 built through `ezpz.init_device_mesh_safe`, because ezpz's device-bound
 default process group makes torch take the `split_group` path, which
 xccl does not support on XPU. The two variants are numerically
-identical: on Sunspot both produce train loss 1.1086 -> 1.0085 and val
+identical: on Aurora both produce train loss 1.1086 -> 1.0085 and val
 loss 1.0180 -> 1.0041 for the `mp_smoke_dt` config above.
 
 ## Model parallelism
