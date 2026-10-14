@@ -17,12 +17,29 @@
 set -x
 cd "${PBS_O_WORKDIR:-$HOME/tp-test-clone}" || exit 1
 
-# --- environment (frameworks RC: oneAPI + PyTorch for XPU) -------------------
-source "$HOME/rc_env.sh"
-source "$HOME/venvs/rc4-ezpz/bin/activate"
+# --- environment: builtin frameworks module + workdir-local venv ------------
+# (a venv in $HOME would break on systems where $HOME is read-only on
+# compute nodes; everything below lives under the job's working directory)
+module load "${FRAMEWORKS_MODULE:-frameworks/2026.1.0}"
+VENV_DIR="${TP_VENV:-$PWD/.venv}"
+if [ ! -x "$VENV_DIR/bin/python3" ]; then
+    python3 -m venv --system-site-packages "$VENV_DIR" || exit 1
+fi
+source "$VENV_DIR/bin/activate"
 which python3
 
+# tensorboard is the one runtime dependency the frameworks env lacks;
+# install it into the local venv (via the ALCF proxy) only if missing
+if ! python3 -c "import tensorboard" 2>/dev/null; then
+    export http_proxy="${http_proxy:-http://proxy.alcf.anl.gov:3128}"
+    export https_proxy="${https_proxy:-http://proxy.alcf.anl.gov:3128}"
+    export HTTP_PROXY="${HTTP_PROXY:-$http_proxy}"
+    export HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}"
+    python3 -m pip install -q tensorboard || exit 1
+fi
+
 export CCL_LOG_LEVEL=warn
+export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 unset ZE_AFFINITY_MASK
 
 python3 -c "import torch, sys; print('torch', torch.__version__); sys.exit(0 if torch.xpu.is_available() else 1)" || {

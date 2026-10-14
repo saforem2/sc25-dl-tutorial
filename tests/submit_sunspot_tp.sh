@@ -5,9 +5,10 @@
 #
 #   cd ~/tp-test-clone && qsub tests/submit_sunspot_tp.sh
 #
-# Uses the frameworks RC environment (~/rc_env.sh: modules + conda env with
-# PyTorch built for XPU) plus the rc4-ezpz venv layered on top of it.
-# Runs tests/test_parallel_dims.py (unit tests, single process) and
+# Environment: the builtin `frameworks` module (PyTorch for XPU) plus a
+# .venv built on top of it in the working directory -- no per-user setup
+# scripts or home-directory state, so anyone with Sunspot access can run
+# this. Runs tests/test_parallel_dims.py (unit tests, single process) and
 # tests/check_tp_equivalence.py under torchrun at TP=2 (world 2) and
 # TP=2 x DP=2 (world 4).
 #PBS -N vit-tp-xpu
@@ -21,12 +22,19 @@
 set -x
 cd "${PBS_O_WORKDIR:-$HOME/tp-test-clone}" || exit 1
 
-# --- environment (frameworks RC: oneAPI + PyTorch for XPU) -------------------
-source "$HOME/rc_env.sh"
-source "$HOME/venvs/rc4-ezpz/bin/activate"
+# --- environment: builtin frameworks module + workdir-local venv ------------
+# (a venv in $HOME would break on systems where $HOME is read-only on
+# compute nodes; everything below lives under the job's working directory)
+module load "${FRAMEWORKS_MODULE:-frameworks/2026.1.0}"
+VENV_DIR="${TP_VENV:-$PWD/.venv}"
+if [ ! -x "$VENV_DIR/bin/python3" ]; then
+    python3 -m venv --system-site-packages "$VENV_DIR" || exit 1
+fi
+source "$VENV_DIR/bin/activate"
 which python3
 
 export DEVICE=xpu
+export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 export CCL_LOG_LEVEL=warn
 unset ZE_AFFINITY_MASK
 
