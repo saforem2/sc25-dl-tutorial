@@ -38,7 +38,11 @@ which python3
 NEED_PIP=()
 python3 -c "import tensorboard" 2>/dev/null || NEED_PIP+=(tensorboard)
 python3 -c "import ruamel.yaml" 2>/dev/null || NEED_PIP+=(ruamel.yaml)
-python3 -c "import ezpz" 2>/dev/null || NEED_PIP+=(ezpz)
+# NOTE: ezpz here is saforem2/ezpz (distributed-training utilities). The
+# PyPI package named "ezpz" is an unrelated image tool -- install from git,
+# and verify the import is the right package (it has ezpz.distributed).
+python3 -c "import ezpz.distributed" 2>/dev/null || \
+    NEED_PIP+=("git+https://github.com/saforem2/ezpz")
 if [ "${#NEED_PIP[@]}" -gt 0 ]; then
     export http_proxy="${http_proxy:-http://proxy.alcf.anl.gov:3128}"
     export https_proxy="${https_proxy:-http://proxy.alcf.anl.gov:3128}"
