@@ -587,7 +587,10 @@ if __name__ == "__main__":
             tp=args.tensor_parallel,
         )
     if use_fsdp_path:
-        parallel_dims.build_mesh(device_type=args.device_type)
+        # with --ezpz the default PG is device-bound (ezpz passes
+        # device_id= to init_process_group), so the mesh must be built
+        # through ezpz's split_group-safe helpers on XPU
+        parallel_dims.build_mesh(device_type=args.device_type, safe=args.ezpz)
         args.dp_group = parallel_dims.dp_group
         args.dp_rank = parallel_dims.dp_rank
         if world_rank == 0:

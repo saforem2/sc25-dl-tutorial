@@ -77,19 +77,34 @@ class ParallelDims:
         """True when a mesh is needed (any degree > 1, or HSDP requested)."""
         return self.tp > 1 or self.dp_replicate > 1
 
-    def build_mesh(self, device_type="cuda"):
-        """Build the DeviceMesh. Requires torch.distributed to be initialized."""
+    def build_mesh(self, device_type="cuda", safe=False):
+        """Build the DeviceMesh. Requires torch.distributed to be initialized.
+
+        ``safe=True`` routes mesh construction through ezpz's
+        ``init_device_mesh_safe`` / ``flatten_device_mesh_safe``. That is
+        required when the default process group is *device-bound* (created
+        with ``device_id=``, as ezpz's ``setup_torch`` does): on XPU, xccl
+        does not support the ``split_group`` path torch would otherwise
+        take for mesh (sub)groups, and fails with "No backend for the
+        parent process group or its backend does not support splitting".
+        """
         if self.mesh is not None:
             return self.mesh
+        if safe:
+            import ezpz
+
+            init_fn = ezpz.init_device_mesh_safe
+        else:
+            init_fn = init_device_mesh
         if self.dp_replicate > 1:
-            self.mesh = init_device_mesh(
+            self.mesh = init_fn(
                 device_type,
                 (self.dp_replicate, self.dp_shard, self.tp),
                 mesh_dim_names=("dp_replicate", "dp_shard", "tp"),
             )
             self.fsdp_mesh = self.mesh[("dp_replicate", "dp_shard")]
         else:
-            self.mesh = init_device_mesh(
+            self.mesh = init_fn(
                 device_type,
                 (self.dp_shard, self.tp),
                 mesh_dim_names=("dp", "tp"),
@@ -98,11 +113,20 @@ class ParallelDims:
         self.tp_mesh = self.mesh["tp"]
         # a single flattened view of *all* data-parallel ranks, used for
         # loss/metric reductions and for the data-loader shard id
-        self._dp_mesh = self.mesh.flatten(
-            "dp_flat", mesh_dim_names=(
-                ("dp_replicate", "dp_shard") if self.dp_replicate > 1 else ("dp",)
+        if safe and self.dp_replicate > 1:
+            import ezpz.distributed
+
+            self._dp_mesh = ezpz.distributed.flatten_device_mesh_safe(
+                self.mesh[("dp_replicate", "dp_shard")], "dp_flat"
             )
-        ) if hasattr(self.mesh, "flatten") else self.fsdp_mesh
+        elif safe:
+            self._dp_mesh = self.fsdp_mesh
+        else:
+            self._dp_mesh = self.mesh.flatten(
+                "dp_flat", mesh_dim_names=(
+                    ("dp_replicate", "dp_shard") if self.dp_replicate > 1 else ("dp",)
+                )
+            ) if hasattr(self.mesh, "flatten") else self.fsdp_mesh
         return self.mesh
 
     def _require_mesh(self):
