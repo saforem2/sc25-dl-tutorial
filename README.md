@@ -504,8 +504,12 @@ batch is split across `dp` only (every rank in a `tp` group sees the same
 batch).
 
 ```
-# 4-way tensor parallel + 4-way data parallel on 16 GPUs (4 nodes)
-sbatch --nodes 4 submit_pm.sh --config=mp_short --tensor_parallel=4 --run_num=tp4
+# 4-way tensor parallel + 4-way data parallel on 16 GPUs (4 nodes).
+# NOTE: submit_pm_dp.sh is the multi-node script (4 tasks x 4 GPUs per
+# node, -q regular); the single-node submit_pm.sh would not give a
+# 16-rank world. Outside the SC25 tutorial event, drop/adjust the
+# script's --reservation line to match your allocation.
+sbatch --nodes 4 submit_pm_dp.sh --config=mp_short --tensor_parallel=4 --run_num=tp4
 ```
 
 Useful flags (all on `train.py`):
