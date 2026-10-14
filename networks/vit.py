@@ -62,9 +62,17 @@ class Attention(nn.Module):
     def forward(self, x):
         B, N, C = x.shape
 
-        q = self.q(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        k = self.k(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
-        v = self.v(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        # Under DTensor tensor parallelism (networks/tensor_parallel.py),
+        # q/k/v are column-sharded: each rank holds a contiguous subset of
+        # the heads, so the projected dim is C // tp rather than C. Derive
+        # the local head count from the tensor itself -- with no sharding
+        # this is exactly num_heads and the shapes are unchanged.
+        q = self.q(x)
+        local_dim = q.shape[-1]
+        local_heads = local_dim // self.head_dim
+        q = q.reshape(B, N, local_heads, self.head_dim).permute(0, 2, 1, 3)
+        k = self.k(x).reshape(B, N, local_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = self.v(x).reshape(B, N, local_heads, self.head_dim).permute(0, 2, 1, 3)
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
@@ -80,7 +88,9 @@ class Attention(nn.Module):
             attn = self.attn_drop(attn)
             x = attn @ v
 
-        x = x.transpose(1, 2).reshape(B, N, C)
+        # local_dim (not C): proj is row-sharded under tensor parallelism
+        # and expects the head-sharded width as its input
+        x = x.transpose(1, 2).reshape(B, N, local_dim)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
